@@ -1,0 +1,157 @@
+import numpy as np 
+from scipy.special import jv
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+
+
+kB_eV = 8.617e-5 # eV/K
+e = 1.602e-19 # C
+Eexc = 11.6 
+Eiz = 12.127 
+u = 1.6605e-27
+M = 131.29 * u # M 
+R = 0.06 # radius in meters
+L = 0.1 # length in meters
+A = np.pi * R**2 + 2 * np.pi * R * L
+
+V = np.pi * R**2 * L # V
+beta_g = 0.3
+beta_i = 0.7
+Q0 = 1.2e19 # s**-1
+Tg0 = 300 # K
+Ag = beta_g * np.pi * R**2
+sigma_i = 1e-18 # sigma_i in m**2
+me = 9.109e-31 # kg
+Kel = 1e-13
+k = 0.0057 # W/K
+Delta0 = R/2.405 + L/np.pi
+Rcoil = 2 # Ohm
+epsilon_0 = 8.854e-12 # F/m
+f = 13.56e6 # Hz
+c = 3e8 # m/s
+N = 5 # Turns
+omega = 2 * np.pi * f
+
+
+
+
+def Ic(PRF_, Rind_, Rcoil_):
+    Icoil_ = np.sqrt(2 * PRF_ / (Rind_ + Rcoil_))
+    return Icoil_
+
+
+def derivation(t, Y, PRF):
+    n, ng, Tg, Te = Y
+    Kex = 1.2921e-13 * np.exp(- Eexc / (kB_eV * Te))
+
+
+    Kiz1 = 6.73e-15 * np.sqrt(kB_eV * Te) * (3.97 + 0.643 * (kB_eV * Te) - 0.0368 * (kB_eV * Te)**2) * np.exp(- Eiz / (kB_eV * Te))
+    Kiz2 = 6.73e-15 * np.sqrt(kB_eV * Te) * (-0.0001031 * (kB_eV * Te)**2 + 6.386 * np.exp(- Eiz / (kB_eV * Te)))
+    Kiz = (Kiz1 + Kiz2) / 2
+
+
+    # dn/dt
+
+    uB = np.sqrt(kB_eV * Te * e / (M)) #uB
+    mfp_i = (ng * sigma_i)**-1 #mfp_i
+    #hR,hL
+    hL = 0.86 * (3 + L/(2*mfp_i))**-0.5
+    hR = 0.8 * (4 + R/mfp_i)**-0.5
+
+    Aeff = 2 * hR * np.pi * R * L + 2 * hL * np.pi * R**2 #Aeff
+
+    dn_dt = n * ng * Kiz - n * uB * Aeff / V
+
+
+    vg = np.sqrt(8 * kB_eV * e * Tg / (np.pi * M))
+    Gamma_g = 0.25 * ng * vg
+    Aeff1 = 2 * hR * np.pi * R * L + (2 - beta_i) * hL * np.pi * R**2 #Aeff1
+
+    dng_dt = Q0 / V + n * uB * Aeff1 / V - n * ng * Kiz - Gamma_g * Ag / V
+
+    Ti = Tg
+    vi = np.sqrt(8 * kB_eV * e * Ti / (np.pi * M))
+    Kin = sigma_i * vi
+    dTg_dt = 2 * me/M * (Te - Tg) * n * Kel + M * uB**2 * n * Kin / (6 * kB_eV * e) - 2 * k * A / (3 * kB_eV * e * V * ng) * (Tg - Tg0) / Delta0 - Tg / ng *dng_dt
+    # now it calls the specific function to calculate Icoil given the input Power
+    nu_m = ng * Kel
+    omega_pe = np.sqrt(n * e**2/(me * epsilon_0))
+    epsilon_p = 1 - omega_pe**2 / (omega * (omega - 1j * nu_m))
+    k0_ = omega / c
+    k_ = k0_ * np.sqrt(epsilon_p)
+    argument = R * k_
+    Rind = 2*np.pi*N**2 / (L*omega*epsilon_0) * np.real(1j * argument * jv(1, argument) / (epsilon_p * jv(0, argument)))
+    Icoil = Ic(PRF, Rind, Rcoil)
+    Ploss = Eiz * e * n * ng * Kiz + Eexc * e * n * ng * Kex + 3 * me/M * kB_eV * e * (Te - Tg) * n * ng * Kel + 7 * kB_eV * e * Te * n * uB * Aeff / V
+    Pabs = Rind * Icoil**2 / (2*V)
+
+    dTe_dt = 2/3 * (Pabs - Ploss) / (n * kB_eV * e) - Te / n * dn_dt
+
+    return dn_dt, dng_dt, dTg_dt, dTe_dt
+
+n_test = 1e17      # m^-3
+ng_test = 3e19     # m^-3
+Tg_test = 300.0    # Kelvin
+Te_test = 40000.0  # Kelvin (~3.4 eV)
+PRF_test = 1000 # arbitrary
+Y0 = [n_test, ng_test, Tg_test, Te_test]
+
+
+def integration_for_ss_values(derivation,Y0,PRF):
+    fun_sim = lambda t, y: derivation(t, y, PRF)
+    sol = solve_ivp(fun_sim, [0, 0.03], Y0, method='LSODA', rtol=1e-6, atol=1e-10)
+    time = sol.t
+    plasma_number_density = sol.y[0]
+    gas_number_density = sol.y[1]
+    gas_temperature = sol.y[2]
+    electron_temperature = sol.y[3]
+
+    n_ss = plasma_number_density[-1]
+    ng_ss = gas_number_density[-1]
+    Tg_ss = gas_temperature[-1]
+    Te_ss = electron_temperature[-1]
+    return n_ss, ng_ss, Tg_ss, Te_ss
+
+
+# not it is time to change the input PRF ranging it from 0 W to 1600 W to assess if the code returns similar results to the ones on the paper
+
+PRF = np.arange(100, 1601, 150) # the step here is 200 W
+
+Y_from_0W_to_1600W = []
+for power_value in PRF:
+    Y_fixedPRF = integration_for_ss_values(derivation, Y0, power_value)
+    Y_from_0W_to_1600W.append(Y_fixedPRF)
+
+Y_from_0W_to_1600W = np.array(Y_from_0W_to_1600W)
+
+plt.figure()
+plt.plot(PRF, Y_from_0W_to_1600W[:,0])
+plt.xlabel('PRF (W)')
+plt.ylabel('number density (m**-3)')
+plt.title('Plasma number density vs PRF')
+plt.grid(True)
+
+plt.figure()
+plt.plot(PRF, Y_from_0W_to_1600W[:,1])
+plt.xlabel('PRF (W)')
+plt.ylabel('number density (m**-3)')
+plt.title('Gas number density vs PRF')
+plt.grid(True)
+
+plt.figure()
+plt.plot(PRF, Y_from_0W_to_1600W[:,2])
+plt.xlabel('PRF (W)')
+plt.ylabel('temperature (K)')
+plt.title('Gas temperature vs PRF')
+plt.grid(True)
+
+plt.figure()   
+plt.plot(PRF, Y_from_0W_to_1600W[:,3])
+plt.xlabel('PRF (W)')
+plt.ylabel('temperature (K)')
+plt.title('Plasma temperature vs PRF')
+plt.grid(True)
+plt.show()
+
+
+
