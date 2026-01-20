@@ -1,2 +1,3 @@
-# Global_Model_GIT
-Python implementation of a 0D Global Model for ICP Plasma Thrusters based on Chabert's physics.
+# Global Model of a GIT Thruster
+
+![Status](https://img.shields.io/badge/Status-Work_in_Progress-yellow?style=for-the-badge)
