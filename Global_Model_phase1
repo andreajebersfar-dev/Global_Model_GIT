@@ -35,7 +35,7 @@ k0_ = omega / c
 
 s = 0.001 # grids gap in m
 Vgrid = 1000 # V
-
+v_beam = np.sqrt(2*e*Vgrid/M)
 
 
 
@@ -120,7 +120,7 @@ def integration_for_ss_values(derivation,Y0,PRF):
 
 # not it is time to change the input PRF ranging it from 0 W to 1600 W to assess if the code returns similar results to the ones on the paper
 
-PRF = np.arange(100, 1601, 150) # the step here is 200 W
+PRF = np.arange(100, 1601, 15) # the step here is 15 W
 
 Y_from_0W_to_1600W = []
 for power_value in PRF:
@@ -137,6 +137,7 @@ Y_from_0W_to_1600W = np.array(Y_from_0W_to_1600W)
 #     Ji.append(Gamma_i*e)
 n_vec = Y_from_0W_to_1600W[:,0]
 ng_vec = Y_from_0W_to_1600W[:,1]
+Tg_vec = Y_from_0W_to_1600W[:,2]
 Te_vec = Y_from_0W_to_1600W[:,3]
 
 uB_vec = np.sqrt(kB_eV*e*Te_vec/M)
@@ -152,8 +153,8 @@ epsilon_p_vec = 1 - omega_pe_vec**2 / (omega * (omega - 1j * nu_m_vec))
 k_vec = k0_ * epsilon_p_vec**0.5
 argument_vec = k_vec * R
 Rind_vec = 2 * np.pi * N**2 / (L * omega * epsilon_0) * np.real(1j * argument_vec * jv(1, argument_vec) / (epsilon_p_vec * jv(0, argument_vec)))
-eta_vec = Rind_vec / (Rind_vec + Rcoil)
-Pabs_vec = eta_vec * PRF
+zeta_vec_Power_transfer_eff = Rind_vec / (Rind_vec + Rcoil)
+Pabs_vec = zeta_vec_Power_transfer_eff * PRF
 
 
 # Child-Langmuir Limitation
@@ -166,34 +167,127 @@ plt.xlabel('PRF (W)')
 plt.ylabel('C/(m**2 * s)')
 plt.title('Ion Current vs PRF')
 plt.axhline(y = JCL, linestyle = '--', label = 'Child-Langmuir limitation') 
-## here I want a verical asymptote
+P_sat = np.interp(JCL, Ji_vec, PRF)
+if np.max(Ji_vec) > JCL:
+    plt.axvline(x = P_sat, color = 'k', linestyle = '-.', label = f'Saturation ({P_sat:.0f} W)')
+    plt.plot(P_sat, JCL, 'ko')
+else:
+    print('no intersection present')
 plt.grid(True)
+plt.legend()
 plt.show()
 
 
-fig, axs = plt.subplots(2, 2, figsize=(12,10))
-plt.suptitle('n, ng, Tg, Te vs PRF (ranging from 100 W to 1600 W)', fontsize=16)
-axs[0, 0].plot(PRF, Y_from_0W_to_1600W[:,0])
-axs[0, 0].set_xlabel('PRF (W)')
-axs[0, 0].set_ylabel('number density (m**-3)')
-axs[0, 0].set_title('Plasma number density vs PRF')
-axs[0, 0].grid(True)
-axs[1, 0].plot(PRF, Y_from_0W_to_1600W[:,1])
-axs[1, 0].set_xlabel('PRF (W)')
-axs[1, 0].set_ylabel('number density (m**-3)')
-axs[1, 0].set_title('Gas number density vs PRF')
-axs[1, 0].grid(True)
-axs[0, 1].plot(PRF, Y_from_0W_to_1600W[:,2])
-axs[0, 1].set_xlabel('PRF (W)')
-axs[0, 1].set_ylabel('temperature (K)')
-axs[0, 1].set_title('Gas temperature vs PRF')
-axs[0, 1].grid(True)
-axs[1, 1].plot(PRF, Y_from_0W_to_1600W[:,3])
-axs[1, 1].set_xlabel('PRF (W)')
-axs[1, 1].set_ylabel('temperature (K)')
-axs[1, 1].set_title('Electron temperature vs PRF')
-axs[1, 1].grid(True)
+# fig, axs = plt.subplots(2, 2, figsize=(12,10))
+# plt.suptitle('n, ng, Tg, Te vs PRF (ranging from 100 W to 1600 W)', fontsize=16)
+# axs[0, 0].plot(PRF, Y_from_0W_to_1600W[:,0])
+# axs[0, 0].set_xlabel('PRF (W)')
+# axs[0, 0].set_ylabel('number density (m**-3)')
+# axs[0, 0].set_title('Plasma number density vs PRF')
+# axs[0, 0].grid(True)
+# axs[1, 0].plot(PRF, Y_from_0W_to_1600W[:,1])
+# axs[1, 0].set_xlabel('PRF (W)')
+# axs[1, 0].set_ylabel('number density (m**-3)')
+# axs[1, 0].set_title('Gas number density vs PRF')
+# axs[1, 0].grid(True)
+# axs[0, 1].plot(PRF, Y_from_0W_to_1600W[:,2])
+# axs[0, 1].set_xlabel('PRF (W)')
+# axs[0, 1].set_ylabel('temperature (K)')
+# axs[0, 1].set_title('Gas temperature vs PRF')
+# axs[0, 1].grid(True)
+# axs[1, 1].plot(PRF, Y_from_0W_to_1600W[:,3])
+# axs[1, 1].set_xlabel('PRF (W)')
+# axs[1, 1].set_ylabel('temperature (K)')
+# axs[1, 1].set_title('Electron temperature vs PRF')
+# axs[1, 1].grid(True)
 
+# plt.tight_layout()
+# plt.show()
+
+fig, ax1 = plt.subplots(figsize=(10, 6))
+color1 = 'tab:blue'
+ax1.set_xlabel('PRF (W)')
+ax1.set_ylabel('Gas Temperature (K)', color = color1)
+ax1.plot(PRF, Y_from_0W_to_1600W[:,2], color = color1, label = 'Gas Temperature (K)', linestyle = '-')
+ax1.tick_params(axis = 'y', labelcolor = color1)
+ax1.grid(True, alpha=0.3)
+lines1, labels1 = ax1.get_legend_handles_labels()
+ax2 = ax1.twinx()
+color2 = 'tab:red'
+ax2.set_ylabel('Electron Temperature (eV)', color = color2)
+ax2.plot(PRF, Y_from_0W_to_1600W[:,3]*kB_eV, color = color2, label = 'Electron Temperature (eV)', linestyle = '--')
+ax2.tick_params(axis = 'y', labelcolor = color2)
+ax2.grid(True, alpha=0.3)
+plt.title('Temperatures vs PRF')
+plt.axvline(x = P_sat, color = 'k', linestyle = '-.', label = f'Saturation ({P_sat:.0f} W)')
+lines2, labels2 = ax2.get_legend_handles_labels()
+plt.legend(lines1 + lines2, labels1 + labels2, loc = 'upper left')
+plt.tight_layout()
+
+plt.show()
+
+# zeta_vec_Power_transfer_eff is already defined. Now let's define the Thrust-Power efficiency
+Ai = beta_i * np.pi * R**2
+Pi_vec = Ji_vec * Vgrid * Ai
+vg_vec = np.sqrt(8 * kB_eV * e * Tg_vec / (np.pi * M))
+Gamma_g_vec = 0.25 * ng_vec * vg_vec
+Pn_vec = 0.5 * M * vg_vec**2 * Gamma_g_vec * Ag
+gamma_vec__Thrust_Power_eff = (Pi_vec + Pn_vec) / (Pi_vec + Pn_vec + PRF)
+
+# Now let's define the Thrust efficiency
+Ti_vec = Gamma_i_vec * M * v_beam * Ai
+Tn_vec = Gamma_g_vec * M * vg_vec * Ag
+xi_vec_Thrust_eff = (Ti_vec + Tn_vec)/PRF
+
+# Finally the Mass utilization efficiency
+
+eta_vec_mass_utilization_eff = Gamma_i_vec * Ai / Q0
+
+plt.figure()
+plt.plot(PRF, zeta_vec_Power_transfer_eff, label = 'Power transfer efficiency', color = color1, linestyle = '--')
+plt.plot(PRF, gamma_vec__Thrust_Power_eff, label = 'Thrust-Power efficiency', color = color2, linestyle = 'dotted')
+plt.plot(PRF, eta_vec_mass_utilization_eff, label = 'Mass uilization efficiency', color = 'darkorange', linestyle = 'dashdot')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} W)', color = 'k', linestyle = '-.')
+
+plt.xlabel('PRF (W)')
+plt.ylabel('efficiency')
+plt.title('Efficiencies vs PRF')
+plt.legend()
 plt.tight_layout()
 plt.show()
 
+plt.figure()
+plt.plot(PRF, xi_vec_Thrust_eff * 1e6, label = 'Thrust efficiency', color = color1, linestyle = '--')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} W)', color = 'k', linestyle = '-.')
+
+plt.xlabel('PRF (W)')
+plt.ylabel('Thrust efficiency $(mN/kW)$')
+plt.title('Thrust efficiency vs PRF')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure()
+plt.plot(PRF, n_vec, label = 'Plasma number density', color = 'orange', linestyle = 'dotted')
+plt.plot(PRF, ng_vec, label = 'Gas number density', color = 'violet', linestyle = '-')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} W)', color = 'k', linestyle = '-.')
+plt.yscale('log')
+plt.xlabel('PRF (W)')
+plt.ylabel('number density ($m^-3$)')
+plt.title('Particle densities in the thruster chamber as a function of the RF power')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure()
+plt.plot(PRF, Ti_vec * 1000, label = 'Ions', color = color1, linestyle = '-')
+plt.plot(PRF, Tn_vec * 1000, label = 'Neutrals', color = color2, linestyle = '-.')
+plt.plot(PRF, (Ti_vec + Tn_vec) * 1000, label = 'Total', color = 'green')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} W)', color = 'k', linestyle = '-.')
+plt.yscale('log')
+plt.xlabel('PRF ($W$)')
+plt.ylabel('Thrust ($mN$)')
+plt.title('Total Thrust contributions vs PRF')
+plt.legend()
+plt.tight_layout()
+plt.show()
