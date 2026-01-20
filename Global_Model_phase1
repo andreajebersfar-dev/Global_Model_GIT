@@ -25,12 +25,17 @@ me = 9.109e-31 # kg
 Kel = 1e-13
 k = 0.0057 # W/K
 Delta0 = R/2.405 + L/np.pi
-Rcoil = 2 # Ohm
+Rcoil = 0.7 # Ohm
 epsilon_0 = 8.854e-12 # F/m
 f = 13.56e6 # Hz
 c = 3e8 # m/s
 N = 5 # Turns
 omega = 2 * np.pi * f
+k0_ = omega / c
+
+s = 0.001 # grids gap in m
+Vgrid = 1000 # V
+
 
 
 
@@ -77,7 +82,7 @@ def derivation(t, Y, PRF):
     nu_m = ng * Kel
     omega_pe = np.sqrt(n * e**2/(me * epsilon_0))
     epsilon_p = 1 - omega_pe**2 / (omega * (omega - 1j * nu_m))
-    k0_ = omega / c
+    
     k_ = k0_ * np.sqrt(epsilon_p)
     argument = R * k_
     Rind = 2*np.pi*N**2 / (L*omega*epsilon_0) * np.real(1j * argument * jv(1, argument) / (epsilon_p * jv(0, argument)))
@@ -89,7 +94,7 @@ def derivation(t, Y, PRF):
 
     return dn_dt, dng_dt, dTg_dt, dTe_dt
 
-n_test = 1e17      # m^-3
+n_test = 5e16      # m^-3
 ng_test = 3e19     # m^-3
 Tg_test = 300.0    # Kelvin
 Te_test = 40000.0  # Kelvin (~3.4 eV)
@@ -123,35 +128,72 @@ for power_value in PRF:
     Y_from_0W_to_1600W.append(Y_fixedPRF)
 
 Y_from_0W_to_1600W = np.array(Y_from_0W_to_1600W)
+# Ji = []
+# for i in range(Y_from_0W_to_1600W.shape[0]):
+#     ub = np.sqrt(kB_eV*e*Y_from_0W_to_1600W[i,3]/M)
+#     mfp = (Y_from_0W_to_1600W[i,1] * sigma_i)**-1
+#     hl = 0.86 * (3 + L/(2*mfp))**-0.5
+#     Gamma_i = hl * Y_from_0W_to_1600W[i,0] * ub
+#     Ji.append(Gamma_i*e)
+n_vec = Y_from_0W_to_1600W[:,0]
+ng_vec = Y_from_0W_to_1600W[:,1]
+Te_vec = Y_from_0W_to_1600W[:,3]
 
-plt.figure()
-plt.plot(PRF, Y_from_0W_to_1600W[:,0])
-plt.xlabel('PRF (W)')
-plt.ylabel('number density (m**-3)')
-plt.title('Plasma number density vs PRF')
-plt.grid(True)
+uB_vec = np.sqrt(kB_eV*e*Te_vec/M)
+mfp_i_vec = (sigma_i * ng_vec)**-1
+hL_vec = 0.86 * (3 + L/(2 * mfp_i_vec))**-0.5
+Gamma_i_vec = hL_vec * n_vec * uB_vec
+Ji_vec = Gamma_i_vec * e
 
-plt.figure()
-plt.plot(PRF, Y_from_0W_to_1600W[:,1])
-plt.xlabel('PRF (W)')
-plt.ylabel('number density (m**-3)')
-plt.title('Gas number density vs PRF')
-plt.grid(True)
 
-plt.figure()
-plt.plot(PRF, Y_from_0W_to_1600W[:,2])
-plt.xlabel('PRF (W)')
-plt.ylabel('temperature (K)')
-plt.title('Gas temperature vs PRF')
-plt.grid(True)
+nu_m_vec = ng_vec * Kel
+omega_pe_vec = np.sqrt(n_vec * e**2/(me * epsilon_0))
+epsilon_p_vec = 1 - omega_pe_vec**2 / (omega * (omega - 1j * nu_m_vec))
+k_vec = k0_ * epsilon_p_vec**0.5
+argument_vec = k_vec * R
+Rind_vec = 2 * np.pi * N**2 / (L * omega * epsilon_0) * np.real(1j * argument_vec * jv(1, argument_vec) / (epsilon_p_vec * jv(0, argument_vec)))
+eta_vec = Rind_vec / (Rind_vec + Rcoil)
+Pabs_vec = eta_vec * PRF
 
-plt.figure()   
-plt.plot(PRF, Y_from_0W_to_1600W[:,3])
+
+# Child-Langmuir Limitation
+JCL = 4/9 * epsilon_0 * np.sqrt(2*e/M) * Vgrid**1.5 /(s**2)
+
+
+plt.figure(figsize=(7, 5))   
+plt.plot(PRF, Ji_vec)
 plt.xlabel('PRF (W)')
-plt.ylabel('temperature (K)')
-plt.title('Plasma temperature vs PRF')
+plt.ylabel('C/(m**2 * s)')
+plt.title('Ion Current vs PRF')
+plt.axhline(y = JCL, linestyle = '--', label = 'Child-Langmuir limitation') 
+## here I want a verical asymptote
 plt.grid(True)
 plt.show()
 
 
+fig, axs = plt.subplots(2, 2, figsize=(12,10))
+plt.suptitle('n, ng, Tg, Te vs PRF (ranging from 100 W to 1600 W)', fontsize=16)
+axs[0, 0].plot(PRF, Y_from_0W_to_1600W[:,0])
+axs[0, 0].set_xlabel('PRF (W)')
+axs[0, 0].set_ylabel('number density (m**-3)')
+axs[0, 0].set_title('Plasma number density vs PRF')
+axs[0, 0].grid(True)
+axs[1, 0].plot(PRF, Y_from_0W_to_1600W[:,1])
+axs[1, 0].set_xlabel('PRF (W)')
+axs[1, 0].set_ylabel('number density (m**-3)')
+axs[1, 0].set_title('Gas number density vs PRF')
+axs[1, 0].grid(True)
+axs[0, 1].plot(PRF, Y_from_0W_to_1600W[:,2])
+axs[0, 1].set_xlabel('PRF (W)')
+axs[0, 1].set_ylabel('temperature (K)')
+axs[0, 1].set_title('Gas temperature vs PRF')
+axs[0, 1].grid(True)
+axs[1, 1].plot(PRF, Y_from_0W_to_1600W[:,3])
+axs[1, 1].set_xlabel('PRF (W)')
+axs[1, 1].set_ylabel('temperature (K)')
+axs[1, 1].set_title('Electron temperature vs PRF')
+axs[1, 1].grid(True)
+
+plt.tight_layout()
+plt.show()
 
