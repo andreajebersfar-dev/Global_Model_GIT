@@ -128,13 +128,7 @@ for power_value in PRF:
     Y_from_0W_to_1600W.append(Y_fixedPRF)
 
 Y_from_0W_to_1600W = np.array(Y_from_0W_to_1600W)
-# Ji = []
-# for i in range(Y_from_0W_to_1600W.shape[0]):
-#     ub = np.sqrt(kB_eV*e*Y_from_0W_to_1600W[i,3]/M)
-#     mfp = (Y_from_0W_to_1600W[i,1] * sigma_i)**-1
-#     hl = 0.86 * (3 + L/(2*mfp))**-0.5
-#     Gamma_i = hl * Y_from_0W_to_1600W[i,0] * ub
-#     Ji.append(Gamma_i*e)
+
 n_vec = Y_from_0W_to_1600W[:,0]
 ng_vec = Y_from_0W_to_1600W[:,1]
 Tg_vec = Y_from_0W_to_1600W[:,2]
@@ -160,7 +154,7 @@ Pabs_vec = zeta_vec_Power_transfer_eff * PRF
 # Child-Langmuir Limitation
 JCL = 4/9 * epsilon_0 * np.sqrt(2*e/M) * Vgrid**1.5 /(s**2)
 
-
+# FIG. 2
 plt.figure(figsize=(7, 5))   
 plt.plot(PRF, Ji_vec)
 plt.xlabel('PRF (W)')
@@ -177,33 +171,7 @@ plt.grid(True)
 plt.legend()
 plt.show()
 
-
-# fig, axs = plt.subplots(2, 2, figsize=(12,10))
-# plt.suptitle('n, ng, Tg, Te vs PRF (ranging from 100 W to 1600 W)', fontsize=16)
-# axs[0, 0].plot(PRF, Y_from_0W_to_1600W[:,0])
-# axs[0, 0].set_xlabel('PRF (W)')
-# axs[0, 0].set_ylabel('number density (m**-3)')
-# axs[0, 0].set_title('Plasma number density vs PRF')
-# axs[0, 0].grid(True)
-# axs[1, 0].plot(PRF, Y_from_0W_to_1600W[:,1])
-# axs[1, 0].set_xlabel('PRF (W)')
-# axs[1, 0].set_ylabel('number density (m**-3)')
-# axs[1, 0].set_title('Gas number density vs PRF')
-# axs[1, 0].grid(True)
-# axs[0, 1].plot(PRF, Y_from_0W_to_1600W[:,2])
-# axs[0, 1].set_xlabel('PRF (W)')
-# axs[0, 1].set_ylabel('temperature (K)')
-# axs[0, 1].set_title('Gas temperature vs PRF')
-# axs[0, 1].grid(True)
-# axs[1, 1].plot(PRF, Y_from_0W_to_1600W[:,3])
-# axs[1, 1].set_xlabel('PRF (W)')
-# axs[1, 1].set_ylabel('temperature (K)')
-# axs[1, 1].set_title('Electron temperature vs PRF')
-# axs[1, 1].grid(True)
-
-# plt.tight_layout()
-# plt.show()
-
+# FIG. 4
 fig, ax1 = plt.subplots(figsize=(10, 6))
 color1 = 'tab:blue'
 ax1.set_xlabel('PRF (W)')
@@ -291,3 +259,199 @@ plt.title('Total Thrust contributions vs PRF')
 plt.legend()
 plt.tight_layout()
 plt.show()
+
+
+def derivation_JCL_fixed(t, Y, PRF, Q0_):
+    n, ng, Tg, Te = Y
+    Kex = 1.2921e-13 * np.exp(- Eexc / (kB_eV * Te))
+
+
+    Kiz1 = 6.73e-15 * np.sqrt(kB_eV * Te) * (3.97 + 0.643 * (kB_eV * Te) - 0.0368 * (kB_eV * Te)**2) * np.exp(- Eiz / (kB_eV * Te))
+    Kiz2 = 6.73e-15 * np.sqrt(kB_eV * Te) * (-0.0001031 * (kB_eV * Te)**2 + 6.386 * np.exp(- Eiz / (kB_eV * Te)))
+    Kiz = (Kiz1 + Kiz2) / 2
+
+
+    # dn/dt
+
+    uB = np.sqrt(kB_eV * Te * e / (M)) #uB
+    mfp_i = (ng * sigma_i)**-1 #mfp_i
+    #hR,hL
+    hL = 0.86 * (3 + L/(2*mfp_i))**-0.5
+    hR = 0.8 * (4 + R/mfp_i)**-0.5
+
+    Aeff = 2 * hR * np.pi * R * L + 2 * hL * np.pi * R**2 #Aeff
+
+    dn_dt = n * ng * Kiz - n * uB * Aeff / V
+
+
+    vg = np.sqrt(8 * kB_eV * e * Tg / (np.pi * M))
+    Gamma_g = 0.25 * ng * vg
+    Aeff1 = 2 * hR * np.pi * R * L + (2 - beta_i) * hL * np.pi * R**2 #Aeff1
+
+    dng_dt = Q0_ / V + n * uB * Aeff1 / V - n * ng * Kiz - Gamma_g * Ag / V
+
+    Ti = Tg
+    vi = np.sqrt(8 * kB_eV * e * Ti / (np.pi * M))
+    Kin = sigma_i * vi
+    dTg_dt = 2 * me/M * (Te - Tg) * n * Kel + M * uB**2 * n * Kin / (6 * kB_eV * e) - 2 * k * A / (3 * kB_eV * e * V * ng) * (Tg - Tg0) / Delta0 - Tg / ng *dng_dt
+    # now it calls the specific function to calculate Icoil given the input Power
+    nu_m = ng * Kel
+    omega_pe = np.sqrt(n * e**2/(me * epsilon_0))
+    epsilon_p = 1 - omega_pe**2 / (omega * (omega - 1j * nu_m))
+    
+    k_ = k0_ * np.sqrt(epsilon_p)
+    argument = R * k_
+    Rind = 2*np.pi*N**2 / (L*omega*epsilon_0) * np.real(1j * argument * jv(1, argument) / (epsilon_p * jv(0, argument)))
+    Icoil = Ic(PRF, Rind, Rcoil)
+    Ploss = Eiz * e * n * ng * Kiz + Eexc * e * n * ng * Kex + 3 * me/M * kB_eV * e * (Te - Tg) * n * ng * Kel + 7 * kB_eV * e * Te * n * uB * Aeff / V
+    Pabs = Rind * Icoil**2 / (2*V)
+
+    dTe_dt = 2/3 * (Pabs - Ploss) / (n * kB_eV * e) - Te / n * dn_dt
+
+    return dn_dt, dng_dt, dTg_dt, dTe_dt
+mg_flow_rates = np.linspace(0.5,40,15)
+Q0_array = (mg_flow_rates * 1e-6) / M
+print(f'JCL = {JCL:.4f} A/(m**2)')
+
+
+def integration_for_ss_values_JCL_fixed(derivation_JCL_fixed,Y0,PRF, Q0_):
+    fun_sim = lambda t, y: derivation_JCL_fixed(t, y, PRF, Q0_)
+    sol = solve_ivp(fun_sim, [0, 0.03], Y0, method='LSODA', rtol=1e-6, atol=1e-10)
+    time = sol.t
+    plasma_number_density = sol.y[0]
+    gas_number_density = sol.y[1]
+    gas_temperature = sol.y[2]
+    electron_temperature = sol.y[3]
+
+    n_ss = plasma_number_density[-1]
+    ng_ss = gas_number_density[-1]
+    Tg_ss = gas_temperature[-1]
+    Te_ss = electron_temperature[-1]
+    return n_ss, ng_ss, Tg_ss, Te_ss
+
+
+# now I sweep the PRF
+PRF_sweep = np.arange(50, 2001, 50)
+P_sat_array = []
+n_sat_array = []
+ng_sat_array = []
+Tg_sat_array = []
+Te_sat_array = []
+Q0_valid_array = []
+zeta_sat_array = []
+eta_sat_array = []
+gamma_sat_array = []
+
+for Q in Q0_array:
+    Y = []
+    for power_value in PRF_sweep:
+        Y_fixedPRF = integration_for_ss_values_JCL_fixed(derivation_JCL_fixed, Y0, power_value, Q)
+        Y.append(Y_fixedPRF)
+
+    Y = np.array(Y)
+
+    n_vec_JCL = Y[:,0]
+    ng_vec_JCL = Y[:,1]
+    Tg_vec_JCL = Y[:,2]
+    Te_vec_JCL = Y[:,3]
+
+    uB_vec_JCL = np.sqrt(kB_eV*e*Te_vec_JCL/M)
+    mfp_i_vec_JCL = (sigma_i * ng_vec_JCL)**-1
+    hL_vec_JCL = 0.86 * (3 + L/(2 * mfp_i_vec_JCL))**-0.5
+    Gamma_i_vec_JCL = hL_vec_JCL * n_vec_JCL * uB_vec_JCL
+    Ji_vec_JCL = Gamma_i_vec_JCL * e
+
+    if np.max(Ji_vec_JCL) < JCL:
+        continue
+
+    nu_m_vec_JCL = ng_vec_JCL * Kel
+    omega_pe_vec_JCL = np.sqrt(n_vec_JCL * e**2/(me * epsilon_0))
+    epsilon_p_vec_JCL = 1 - omega_pe_vec_JCL**2 / (omega * (omega - 1j * nu_m_vec_JCL))
+    k_vec_JCL = k0_ * epsilon_p_vec_JCL**0.5
+    argument_vec_JCL = k_vec_JCL * R
+    Rind_vec_JCL = 2 * np.pi * N**2 / (L * omega * epsilon_0) * np.real(1j * argument_vec_JCL * jv(1, argument_vec_JCL) / (epsilon_p_vec_JCL * jv(0, argument_vec_JCL)))
+    zeta_vec_Power_transfer_eff_JCL = Rind_vec_JCL / (Rind_vec_JCL + Rcoil)
+    Pabs_vec_JCL = zeta_vec_Power_transfer_eff_JCL * PRF_sweep
+
+    Pi_vec_JCL = Ji_vec_JCL * Vgrid * Ai
+    vg_vec_JCL = np.sqrt(8 * kB_eV * e * Tg_vec_JCL / (np.pi * M))
+    Gamma_g_vec_JCL = 0.25 * ng_vec_JCL * vg_vec_JCL
+    Pn_vec_JCL = 0.5 * M * vg_vec_JCL**2 * Gamma_g_vec_JCL * Ag
+    gamma_vec__Thrust_Power_eff_JCL = (Pi_vec_JCL + Pn_vec_JCL) / (Pi_vec_JCL + Pn_vec_JCL + PRF_sweep)
+
+
+    eta_vec_mass_utilization_eff_JCL = Gamma_i_vec_JCL * Ai / Q
+
+
+
+    P_sat_JCL = np.interp(JCL, Ji_vec_JCL, PRF_sweep)
+    P_sat_array.append(P_sat_JCL)
+    
+    n_sat_instance = np.interp(P_sat_JCL, PRF_sweep, n_vec_JCL)
+    ng_sat_instance = np.interp(P_sat_JCL, PRF_sweep, ng_vec_JCL)
+    Tg_sat_instance = np.interp(P_sat_JCL, PRF_sweep, Tg_vec_JCL)
+    Te_sat_instance = np.interp(P_sat_JCL, PRF_sweep, Te_vec_JCL)
+    n_sat_array.append(n_sat_instance)
+    ng_sat_array.append(ng_sat_instance)
+    Tg_sat_array.append(Tg_sat_instance)
+    Te_sat_array.append(Te_sat_instance)
+
+    zeta_sat_instance = np.interp(P_sat_JCL, PRF_sweep, zeta_vec_Power_transfer_eff_JCL)
+    eta_sat_instance = np.interp(P_sat_JCL, PRF_sweep, eta_vec_mass_utilization_eff_JCL)
+    gamma_sat_instance = np.interp(P_sat_JCL, PRF_sweep, gamma_vec__Thrust_Power_eff_JCL)
+    zeta_sat_array.append(zeta_sat_instance)
+    eta_sat_array.append(eta_sat_instance)
+    gamma_sat_array.append(gamma_sat_instance)
+
+    Q0_valid_array.append(Q)
+
+
+Q0_valid_array = np.array(Q0_valid_array)
+n_sat_array = np.array(n_sat_array)
+ng_sat_array = np.array(ng_sat_array)
+Tg_sat_array = np.array(Tg_sat_array)
+Te_sat_array = np.array(Te_sat_array)
+P_sat_array = np.array(P_sat_array)
+zeta_sat_array = np.array(zeta_sat_array)
+eta_sat_array = np.array(eta_sat_array)
+gamma_sat_array = np.array(gamma_sat_array)
+
+
+vg_sat_array = np.sqrt(8 * kB_eV * e * Tg_sat_array / (np.pi * M))
+Tn_sat_array = 0.25 * M * ng_sat_array * Ag * vg_sat_array**2
+Gamma_i_sat = JCL / e
+Ti_scalar = (Gamma_i_sat * Ai) * M * v_beam
+Ti_sat_array = np.full_like(Tn_sat_array, Ti_scalar)
+
+
+Q_array_mg_s = Q0_valid_array * M * 1e6
+
+
+plt.figure()
+plt.plot(Q_array_mg_s, Tn_sat_array * 1000, label = 'Neutrals contribution', linestyle = '--', color = color1)
+plt.plot(Q_array_mg_s, Ti_sat_array * 1000, label = 'Ions contribution', linestyle = '--', color = color2)
+plt.plot(Q_array_mg_s, (Tn_sat_array + Ti_sat_array) * 1000 , label = 'Total contribution', color = 'green')
+plt.title('Thrust vs Injected mass flow rate')
+plt.xlabel('$Q_0$ ($mg/s$)')
+plt.ylabel('Thrust ($mN$)')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure()
+plt.plot(Q_array_mg_s, zeta_sat_array, label = 'Power transfer efficiency', linestyle = 'dotted', color = color1)
+plt.plot(Q_array_mg_s, eta_sat_array, label = 'Mass uilization efficiency', linestyle = 'dotted', color = color2)
+plt.plot(Q_array_mg_s, gamma_sat_array, label = 'Thrust-Power efficiency', color = 'green')
+plt.title('Efficiencies vs Injected mass flow rate')
+plt.xlabel('$Q_0$ ($mg/s$)')
+plt.ylabel('efficiency')
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+        
