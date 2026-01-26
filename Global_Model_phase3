@@ -1,0 +1,34 @@
+"""
+PROJECT: AI-Accelerated Global Model for Gridded Ion Thrusters (GIT)
+
+DESCRIPTION:
+This project aims to develop a machine learning surrogate model for the plasma 
+dynamics inside a Gridded Ion Thruster.
+
+PHASES:
+1.  Physics Solver (Ground Truth): 
+    Replication of the 0D Global Model described in the paper:
+    'Global model of a gridded-ion thruster powered by a radiofrequency inductive coil'
+    (Chabert et al., DOI: 10.1063/1.4737114).
+
+2.  Dataset Generation: 
+    Creation of a synthetic dataset by sweeping input parameters (RF Power, Mass Flow) 
+    and simulating steady-state results using the physics solver.
+
+3.  ML Surrogate Model: 
+    Training a Neural Network to approximate the system of differential equations, 
+    enabling real-time inference.
+
+4.  Dashboard: 
+    Development of a Streamlit interface for interactive performance analysis.
+
+
+
+PHASE 3:
+"""
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+

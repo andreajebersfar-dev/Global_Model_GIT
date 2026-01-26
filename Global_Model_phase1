@@ -653,7 +653,7 @@ Some notes are left to facilitate the comprehension.
 
 # Define the range of Mass Flow Rates to investigate
 # From 0.5 mg/s to 40 mg/s (as per Fig 8 in the paper)
-mg_flow_rates = np.linspace(0.5, 40, 150)
+mg_flow_rates = np.linspace(0.5, 40, 15)
 
 # Convert mass flow (mg/s) to particle flow rate (particles/s)
 # Q [part/s] = (Flow [kg/s]) / Mass_atom [kg]
