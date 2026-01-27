@@ -513,7 +513,7 @@ eta_vec_mass_utilization_eff = Gamma_i_vec * Ai / Q0
 FIG6 = plt.figure()
 plt.plot(PRF, zeta_vec_Power_transfer_eff, label = 'Power transfer efficiency', color = color1, linestyle = '--')
 plt.plot(PRF, gamma_vec__Thrust_Power_eff, label = 'Thrust-Power efficiency', color = color2, linestyle = 'dotted')
-plt.plot(PRF, eta_vec_mass_utilization_eff, label = 'Mass uilization efficiency', color = 'darkorange', linestyle = 'dashdot')
+plt.plot(PRF, eta_vec_mass_utilization_eff, label = 'Mass utilization efficiency', color = 'darkorange', linestyle = 'dashdot')
 plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} $W$)', color = 'k', linestyle = '-.')
 plt.xlabel('PRF ($W$)')
 plt.ylabel('efficiency')
@@ -653,7 +653,7 @@ Some notes are left to facilitate the comprehension.
 
 # Define the range of Mass Flow Rates to investigate
 # From 0.5 mg/s to 40 mg/s (as per Fig 8 in the paper)
-mg_flow_rates = np.linspace(0.5, 40, 15)
+mg_flow_rates = np.linspace(0.5, 40, 150)
 
 # Convert mass flow (mg/s) to particle flow rate (particles/s)
 # Q [part/s] = (Flow [kg/s]) / Mass_atom [kg]
@@ -897,7 +897,7 @@ plt.close()
 
 FIG9 = plt.figure()
 plt.plot(Q_array_mg_s, zeta_sat_array, label = 'Power transfer efficiency', linestyle = 'dotted', color = color1)
-plt.plot(Q_array_mg_s, eta_sat_array, label = 'Mass uilization efficiency', linestyle = 'dotted', color = color2)
+plt.plot(Q_array_mg_s, eta_sat_array, label = 'Mass utilization efficiency', linestyle = 'dotted', color = color2)
 plt.plot(Q_array_mg_s, gamma_sat_array, label = 'Thrust-Power efficiency', color = 'green')
 plt.title('Efficiencies vs Injected mass flow rate')
 plt.xlabel('$Q_0$ ($mg/s$)')
