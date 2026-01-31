@@ -225,3 +225,6 @@ if __name__ == "__main__":
     # Save the dataset to a CSV file (ready for Phase 3: Machine Learning)
     df.to_csv('GlobalModel_Dataset.csv', index = False)
 
+
+
+    
