@@ -1,0 +1,945 @@
+"""
+PROJECT: AI-Accelerated Global Model for Gridded Ion Thrusters (GIT)
+
+DESCRIPTION:
+This project aims to develop a machine learning surrogate model for the plasma 
+dynamics inside a Gridded Ion Thruster.
+
+PHASES:
+1.  Physics Solver (Ground Truth): 
+    Replication of the 0D Global Model described in the paper:
+    'Global model of a gridded-ion thruster powered by a radiofrequency inductive coil'
+    (Chabert et al., DOI: 10.1063/1.4737114).
+
+2.  Dataset Generation: 
+    Creation of a synthetic dataset by sweeping input parameters (RF Power, Mass Flow) 
+    and simulating steady-state results using the physics solver.
+
+3.  ML Surrogate Model: 
+    Training a Neural Network to approximate the system of differential equations, 
+    enabling real-time inference.
+
+4.  Dashboard: 
+    Development of a Streamlit interface for interactive performance analysis.
+
+
+
+PHASE 1:
+1) GLOBAL CONSTANTS
+2) AUXILIARY FUNCTIONS
+3) SYSTEM OF DIFFERENTIAL EQUATIONS (ODE)
+4) TIME INTEGRATION TO STEADY STATE
+5) SIMULATION LOOP (POWER SWEEP)
+6) POST-PROCESSING (DERIVED QUANTITIES)
+7) ELECTROMAGNETIC CONSISTENCY CHECK
+8) LIMITATIONS
+9) EFFICIENCY & THRUST CALCULATIONS
+10) MODIFIED ODE SYSTEM FOR PLOTS 8 AND 9 (VARIABLE MASS FLOW)
+11) INTEGRATION WRAPPER FOR PLOTS 8 AND 9
+12) INITIALIZATION FOR FINDING PARAMETERS AT SATURATION CONDITION (OPTIMIZATION LOOP)
+13) MASS FLOW OPTIMIZATION LOOP
+14) POST-PROCESSING (DATA CONVERSION & THRUST CALCULATION)
+"""
+
+import numpy as np 
+from scipy.special import jv
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+import io
+
+# --- 1. GLOBAL CONSTANTS ---
+
+# Boltzmann constant (eV/K)
+kB_eV = 8.617e-5
+# Elementary charge (C)
+e = 1.602e-19
+
+# Excitation energy threshold (eV)
+Eexc = 11.6 
+# Ionization energy threshold (eV)
+Eiz = 12.127 
+
+# Atomic mass unit (kg)
+u = 1.6605e-27
+# Mass of a Xenon atom (kg)
+M = 131.29 * u # M 
+# Discharge chamber radius (m)
+R = 0.06 # radius in meters
+# Discharge chamber length (m)
+L = 0.1 # length in meters
+# Total internal surface area of the chamber (m^2)
+A = np.pi * R**2 + 2 * np.pi * R * L
+
+# Volume of the discharge chamber (m^3)
+V = np.pi * R**2 * L # V
+# Grid transparency coefficient for neutrals (dimensionless)
+beta_g = 0.3
+# Grid transparency coefficient for ions (dimensionless)
+beta_i = 0.7
+# Input gas flow rate (particles per second)
+Q0 = 1.2e19 # s**-1
+# Initial gas/wall temperature (K)
+Tg0 = 300 # K
+# Effective grid area for neutral gas loss (m^2)
+Ag = beta_g * np.pi * R**2
+# Ion-neutral collision cross-section (m^2)
+sigma_i = 1e-18 # sigma_i in m**2
+# Electron mass (kg)
+me = 9.109e-31 # kg
+# Rate coefficient for elastic electron-neutral collisions (m^3/s)
+Kel = 1e-13
+# Thermal conductivity of Xenon gas (W/m*K)
+k = 0.0057 # W/K
+# Effective diffusion length for heat transfer (m)
+Delta0 = R/2.405 + L/np.pi
+# Resistance of the inductive coil (Ohm)
+Rcoil = 0.7 # Ohm
+# Permittivity of free space (F/m)
+epsilon_0 = 8.854e-12 # F/m
+# Radio-frequency of the generator (Hz)
+f = 13.56e6 # Hz
+# Speed of light in vacuum (m/s)
+c = 3e8 # m/s
+# Number of turns in the inductive coil
+N = 5 # Turns
+# Angular frequency of the RF field (rad/s)
+omega = 2 * np.pi * f
+# Wave number in vacuum (m^-1)
+k0_ = omega / c
+
+# Gap distance between the grids (m)
+s = 0.001 # grids gap in m
+# Acceleration voltage applied to the grids (V)
+Vgrid = 1000 # V
+# Exhaust velocity of the ion beam (m/s)
+v_beam = np.sqrt(2*e*Vgrid/M)
+
+
+
+# --- 2. AUXILIARY FUNCTIONS ---
+
+def Ic(PRF_, Rind_, Rcoil_):
+    """
+    Calculates the magnitude of the current flowing through the RF coil.
+    
+    Physics:
+    Derived from the total power dissipation formula in an RL circuit:
+    P_RF = 1/2 * R_total * |I_coil|^2
+    Where R_total = R_ind (plasma) + R_coil (circuit loss).
+    
+    Args:
+        PRF_ (float): Input RF Power from the generator (Watts).
+        Rind_ (float): Equivalent resistance of the plasma (Ohms). 
+                       Note: This depends on plasma parameters (n, ng).
+        Rcoil_ (float): Resistance of the copper coil (Ohms).
+        
+    Returns:
+        float: Coil current amplitude (Amperes).
+    """
+    # Rearranging P = 0.5 * R * I^2  -->  I = sqrt(2 * P / R)
+    Icoil_ = np.sqrt(2 * PRF_ / (Rind_ + Rcoil_))
+    return Icoil_
+
+def get_img_from_fig(fig):
+    if isinstance(fig, tuple):
+        fig = fig[0]
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+    buf.seek(0)
+    img_arr = plt.imread(buf)
+    buf.close()
+    return img_arr
+
+# --- 3. SYSTEM OF DIFFERENTIAL EQUATIONS (ODE) ---
+
+def derivation(t, Y, PRF):
+    """
+    Defines the system of 4 Ordinary Differential Equations (ODEs) governing the 
+    Global Model (0D) of the plasma thruster.
+
+    State Variables (Y):
+    - n:  Plasma density (m^-3)
+    - ng: Neutral gas density (m^-3)
+    - Tg: Neutral gas temperature (K)
+    - Te: Electron temperature (K) - converted to eV for rate calcs.
+
+    Args:
+        t (float): Time (s) - required by the solver.
+        Y (list): Current state vector [n, ng, Tg, Te].
+        PRF (float): RF Power input (Watts).
+
+    Returns:
+        list: Derivatives [dn/dt, dng/dt, dTg/dt, dTe/dt].
+    """
+    n, ng, Tg, Te = Y
+
+    # --- A. REACTION RATE COEFFICIENTS ---
+    # Calculated based on Electron Temperature (Te).
+    # Formulas typically derived from integration of cross-sections over a Maxwellian distribution.
+    
+    # Excitation rate coefficient
+    Kex = 1.2921e-13 * np.exp(- Eexc / (kB_eV * Te))
+
+    # Ionization rate coefficient
+    # Split into two parts for better accuracy over the Te range.
+    Kiz1 = 6.73e-15 * np.sqrt(kB_eV * Te) * (3.97 + 0.643 * (kB_eV * Te) - 0.0368 * (kB_eV * Te)**2) * np.exp(- Eiz / (kB_eV * Te))
+    Kiz2 = 6.73e-15 * np.sqrt(kB_eV * Te) * (-0.0001031 * (kB_eV * Te)**2 + 6.386 * np.exp(- Eiz / (kB_eV * Te)))
+    Kiz = (Kiz1 + Kiz2) / 2
+
+
+    # --- B. PLASMA DENSITY BALANCE (dn/dt) ---
+    
+    # Bohm velocity: Speed at which ions enter the sheath at the walls
+    uB = np.sqrt(kB_eV * Te * e / (M)) 
+    
+    # Ion-neutral mean free path
+    mfp_i = (ng * sigma_i)**-1 
+    
+    # Edge-to-center density ratios (hL for axial, hR for radial)
+    # These heuristics account for the density drop near the walls.
+    hL = 0.86 * (3 + L/(2*mfp_i))**-0.5
+    hR = 0.8 * (4 + R/mfp_i)**-0.5
+
+    # Effective surface area for ion loss to the walls
+    Aeff = 2 * hR * np.pi * R * L + 2 * hL * np.pi * R**2 
+
+    # dn/dt = [Production] - [Loss to walls]
+    # Production: Ionization (n * ng * Kiz)
+    # Loss: Flux (n * uB) across effective area, normalized by Volume
+    dn_dt = n * ng * Kiz - n * uB * Aeff / V
+
+
+    # --- C. NEUTRAL GAS DENSITY BALANCE (dng/dt) ---
+
+    # Thermal velocity of neutral gas atoms
+    vg = np.sqrt(8 * kB_eV * e * Tg / (np.pi * M))
+    
+    # Flux of neutrals exiting the grid
+    Gamma_g = 0.25 * ng * vg
+    
+    # Effective area for ion recycling (ions hitting walls return as neutrals)
+    # Note: (2 - beta_i) accounts for ion transparency at the grid
+    Aeff1 = 2 * hR * np.pi * R * L + (2 - beta_i) * hL * np.pi * R**2 
+
+    # dng/dt = [Injection] + [Recycling] - [Ionization] - [Flow out]
+    dng_dt = Q0 / V + n * uB * Aeff1 / V - n * ng * Kiz - Gamma_g * Ag / V
+
+    
+    # --- D. GAS TEMPERATURE BALANCE (dTg/dt) ---
+    
+    # Assumption: Ion temperature approx equals Gas temperature (cold ions)
+    Tions = Tg
+    vi = np.sqrt(8 * kB_eV * e * Tions / (np.pi * M))
+    Kin = sigma_i * vi # Rate for elastic scattering
+    
+    # dTg/dt terms:
+    # 1. Heating from electron–neutral collisions (2*me/M * ...)
+    # 2. Ion–neutral collision heating (M*uB^2...)
+    # 3. Cooling by thermal conduction of the gas towards the walls (Thermal conductivity term)
+    # 4. Convective cooling due to density changes (Tg/ng * dng/dt)
+    dTg_dt = 2 * me/M * (Te - Tg) * n * Kel + M * uB**2 * n * Kin / (6 * kB_eV * e) - 2 * k * A / (3 * kB_eV * e * V * ng) * (Tg - Tg0) / Delta0 - Tg / ng *dng_dt
+    
+
+    # --- E. ELECTROMAGNETIC COUPLING ---
+    
+    # Electron-neutral collision frequency
+    nu_m = ng * Kel
+    
+    # Plasma frequency
+    omega_pe = np.sqrt(n * e**2/(me * epsilon_0))
+    
+    # Plasma dielectric constant (Complex number)
+    epsilon_p = 1 - omega_pe**2 / (omega * (omega - 1j * nu_m))
+    
+    # Electromagnetic wave number in plasma
+    k_ = k0_ * np.sqrt(epsilon_p)
+    argument = R * k_
+    
+    # Equivalent Plasma Resistance (Real part of the impedance)
+    # Derived from Bessel functions (jv) solving Maxwell's equations in a cylinder
+    Rind = 2*np.pi*N**2 / (L*omega*epsilon_0) * np.real(1j * argument * jv(1, argument) / (epsilon_p * jv(0, argument)))
+    
+    # Calculate Coil Current based on input Power (PRF)
+    Icoil = Ic(PRF, Rind, Rcoil)
+    
+
+    # --- F. ELECTRON TEMPERATURE BALANCE (dTe/dt) ---
+
+    # Power Loss (Ploss) per unit volume:
+    # 1. It is a net loss of electronic energy, necessary to create ions
+    # 2. Excitation energy
+    # 3. Same term of the GAS TEMPERATURE BALANCE
+    # 4. Wall losses-electrons that "escape" from the plasma
+    Ploss = Eiz * e * n * ng * Kiz + Eexc * e * n * ng * Kex + 3 * me/M * kB_eV * e * (Te - Tg) * n * ng * Kel + 7 * kB_eV * e * Te * n * uB * Aeff / V
+    
+    # Power Absorbed (Pabs) per unit volume via Inductive Coupling
+    Pabs = Rind * Icoil**2 / (2*V)
+
+    # dTe/dt = (Power In - Power Out) / Heat Capacity - Density Correction
+    dTe_dt = 2/3 * (Pabs - Ploss) / (n * kB_eV * e) - Te / n * dn_dt
+
+    return dn_dt, dng_dt, dTg_dt, dTe_dt
+n_start = 5e16      # m^-3
+ng_start = 3e19     # m^-3
+Tg_start = 300.0    # Kelvin
+Te_start = 40000.0  # Kelvin (~3.4 eV)
+PRF_start = 1000 # arbitrary
+Y0 = [n_start, ng_start, Tg_start, Te_start]
+
+
+# --- 4. TIME INTEGRATION TO STEADY STATE ---
+
+def integration_for_ss_values(derivation, Y0, PRF):
+    """
+    Integrates the ODE system over time until it reaches a Steady State (SS).
+    
+    Args:
+        derivation (function): The ODE system function defined above.
+        Y0 (list): Initial conditions [n0, ng0, Tg0, Te0].
+        PRF (float): RF Power input (Watts) to be passed to the derivative.
+        
+    Returns:
+        tuple: Final (steady-state) values (n_ss, ng_ss, Tg_ss, Te_ss).
+    """
+    
+    # Create a lambda wrapper to pass the 'PRF' parameter to the solver
+    # solve_ivp requires a function signature f(t, y), but our derivation needs f(t, y, PRF)
+    fun_sim = lambda t, y: derivation(t, y, PRF)
+    
+    # Solve the Initial Value Problem (IVP)
+    # Time span: 0 to 0.03 seconds (30 ms). 
+    # 30ms is sufficient to ensure d/dt -> 0 (Steady State).
+    # Method 'LSODA' used because the system is stiff.
+    # (timescales of electrons and neutrals are vastly different).
+    sol = solve_ivp(fun_sim, [0, 0.03], Y0, method='LSODA', rtol=1e-6, atol=1e-10)
+    if not sol.success:
+        print(f'Warning! Integration failed at PRF = {PRF:.2e} W (fixed Q0 = {Q0:.2e} 1/s)')
+        return np.nan, np.nan, np.nan, np.nan
+    # Extract results
+    time = sol.t
+    plasma_number_density = sol.y[0]
+    gas_number_density = sol.y[1]
+    gas_temperature = sol.y[2]
+    electron_temperature = sol.y[3]
+
+    # We assume the last calculated point (index -1) represents the Steady State (reasonable assumption previously verified)
+    n_ss = plasma_number_density[-1]
+    ng_ss = gas_number_density[-1]
+    Tg_ss = gas_temperature[-1]
+    Te_ss = electron_temperature[-1]
+    
+    return n_ss, ng_ss, Tg_ss, Te_ss
+
+# --- 5. SIMULATION LOOP (POWER SWEEP) ---
+
+# Define the range of RF Power input to simulate (100W to 1600W)
+# Corresponds to the X-axis of the validation plots in the paper.
+PRF = np.arange(100, 1601, 15) # Step size: 15 W
+
+# List to store steady-state results for each power level
+Y_from_0W_to_1600W = []
+
+print("Starting Power Sweep simulation...")
+
+# Loop through each power value in the array
+for power_value in PRF:
+    # Run the integration wrapper for the current power level
+    # Note: We reuse the same initial conditions Y0 for simplicity, 
+    # though strictly one could use the previous result as the new Y0 for speed.
+    Y_fixedPRF = integration_for_ss_values(derivation, Y0, power_value)
+    
+    # Append the result tuple (n, ng, Tg, Te) to the list
+    Y_from_0W_to_1600W.append(Y_fixedPRF)
+
+# Convert list to a NumPy array for easy vector operations
+# Shape: (number_of_steps, 4)
+Y_from_0W_to_1600W = np.array(Y_from_0W_to_1600W)
+
+# Extract columns into individual vectors for plotting/analysis
+n_vec = Y_from_0W_to_1600W[:,0]   # Plasma density vector
+ng_vec = Y_from_0W_to_1600W[:,1]  # Neutral gas density vector
+Tg_vec = Y_from_0W_to_1600W[:,2]  # Gas temperature vector
+Te_vec = Y_from_0W_to_1600W[:,3]  # Electron temperature vector
+
+
+# --- 6. POST-PROCESSING (DERIVED QUANTITIES) ---
+# Now we calculate physical parameters that depend on the state variables.
+
+# Bohm velocity vector (speed of ions entering the sheath)
+uB_vec = np.sqrt(kB_eV * e * Te_vec / M)
+
+# Ion-neutral mean free path vector
+mfp_i_vec = (sigma_i * ng_vec)**-1
+
+# Axial (hL) center-to-edge density ratio
+# Heuristic formula for low-pressure diffusion
+hL_vec = 0.86 * (3 + L/(2 * mfp_i_vec))**-0.5
+
+# Ion Flux vector (Gamma_i) at the sheath edge
+# Gamma = hL * n_center * uB
+Gamma_i_vec = hL_vec * n_vec * uB_vec
+
+# Ion Current Density vector (J_i)
+# This is the extractable current per unit area (A/m^2)
+Ji_vec = Gamma_i_vec * e
+
+
+# --- 7. ELECTROMAGNETIC CONSISTENCY CHECK ---
+# Recalculating the parameters for the whole sweep
+# to check Power Transfer Efficiency (zeta).
+
+# Electron-neutral collision frequency vector
+nu_m_vec = ng_vec * Kel
+
+# Plasma frequency vector
+omega_pe_vec = np.sqrt(n_vec * e**2/(me * epsilon_0))
+
+# Complex plasma dielectric constant vector
+epsilon_p_vec = 1 - omega_pe_vec**2 / (omega * (omega - 1j * nu_m_vec))
+
+# Complex wave number vector
+k_vec = k0_ * epsilon_p_vec**0.5
+argument_vec = k_vec * R
+
+# Inductive Plasma Resistance vector (Real part of impedance)
+# Uses scipy.special.jv (Bessel function of the first kind)
+Rind_vec = 2 * np.pi * N**2 / (L * omega * epsilon_0) * np.real(1j * argument_vec * jv(1, argument_vec) / (epsilon_p_vec * jv(0, argument_vec)))
+
+# Power Transfer Efficiency (zeta)
+# Ratio of power absorbed by plasma vs total power supplied
+zeta_vec_Power_transfer_eff = Rind_vec / (Rind_vec + Rcoil)
+
+# Actual Power Absorbed by the plasma (P_abs)
+Pabs_vec = zeta_vec_Power_transfer_eff * PRF
+
+
+# --- 8. LIMITATIONS ---
+
+# Child-Langmuir Limit (J_CL)
+# This represents the maximum current density the grids can extract before
+# the space-charge limit is reached (saturation).
+# Physics: Depends only on Vacuum Permittivity, Charge/Mass ratio, Voltage, and Gap squared.
+JCL = 4/9 * epsilon_0 * np.sqrt(2*e/M) * Vgrid**1.5 /(s**2)
+
+print(f"Simulation Complete. Child-Langmuir Limit: {JCL:.2f} A/m^2")
+
+
+
+# FIG. 2
+FIG2 = plt.figure()   
+plt.plot(PRF, Ji_vec)
+plt.xlabel('PRF ($W$)')
+plt.ylabel('$C/(m^2 s)$')
+plt.title('Ion Current vs PRF')
+plt.axhline(y = JCL, linestyle = '--', label = 'Child-Langmuir limitation') 
+P_sat = np.interp(JCL, Ji_vec, PRF)
+if np.max(Ji_vec) > JCL:
+    plt.axvline(x = P_sat, color = 'k', linestyle = '-.', label = f'Saturation ({P_sat:.0f} $W$)')
+    plt.plot(P_sat, JCL, 'ko')
+else:
+    print('no intersection present')
+plt.grid(True)
+plt.legend()
+plt.close()
+
+# FIG. 4
+FIG4 = fig, ax1 = plt.subplots()
+color1 = 'tab:blue'
+ax1.set_xlabel('PRF ($W$)')
+ax1.set_ylabel('Gas Temperature ($K$)', color = color1)
+ax1.plot(PRF, Y_from_0W_to_1600W[:,2], color = color1, label = 'Gas Temperature ($K$)', linestyle = '-')
+ax1.tick_params(axis = 'y', labelcolor = color1)
+ax1.grid(True, alpha=0.3)
+lines1, labels1 = ax1.get_legend_handles_labels()
+ax2 = ax1.twinx()
+color2 = 'tab:red'
+ax2.set_ylabel('Electron Temperature ($eV$)', color = color2)
+ax2.plot(PRF, Y_from_0W_to_1600W[:,3]*kB_eV, color = color2, label = 'Electron Temperature ($eV$)', linestyle = '--')
+ax2.tick_params(axis = 'y', labelcolor = color2)
+ax2.grid(True, alpha=0.3)
+plt.title('Temperatures vs PRF')
+plt.axvline(x = P_sat, color = 'k', linestyle = '-.', label = f'Saturation ({P_sat:.0f} $W$)')
+lines2, labels2 = ax2.get_legend_handles_labels()
+plt.legend(lines1 + lines2, labels1 + labels2, loc = 'lower right')
+plt.tight_layout()
+plt.close()
+
+# --- 9. EFFICIENCY & THRUST CALCULATIONS ---
+
+# A. THRUST POWER EFFICIENCY (Gamma)
+# Represents the efficiency of converting absorbed RF power into kinetic power of the jet.
+
+# Effective grid area for ion extraction (accounting for transparency beta_i)
+Ai = beta_i * np.pi * R**2
+
+# Ion Beam Power (Watts) = Current Density * Grid Voltage * Area
+Pi_vec = Ji_vec * Vgrid * Ai
+
+# Neutral Gas thermal velocity (m/s)
+vg_vec = np.sqrt(8 * kB_eV * e * Tg_vec / (np.pi * M))
+
+# Flux of neutrals escaping through the grids
+Gamma_g_vec = 0.25 * ng_vec * vg_vec
+
+# Kinetic Power carried by Neutrals (Watts) 
+Pn_vec = 0.5 * M * vg_vec**2 * Gamma_g_vec * Ag
+
+# Thrust Power Efficiency (gamma) = (Beam Power + Neutral Power) / Total Power
+# Note: Total Power here is defined as Beam Power + Neutral Power + RF Power Input
+gamma_vec__Thrust_Power_eff = (Pi_vec + Pn_vec) / (Pi_vec + Pn_vec + PRF)
+
+
+# B. TOTAL THRUST & SPECIFIC THRUST (Xi)
+
+# Ion Thrust (Newtons) = Mass Flow Rate (Ions) * Beam Velocity
+# Note: Gamma_i_vec * M * Ai is the mass flow rate of ions (kg/s)
+Ti_vec = Gamma_i_vec * M * v_beam * Ai
+
+# Neutral Thrust (Newtons) = Mass Flow Rate (Neutrals) * Thermal Velocity
+# This component is usually negligible compared to ion thrust but physically present.
+Tn_vec = Gamma_g_vec * M * vg_vec * Ag
+
+# Thrust Efficiency / Specific Thrust (N/W)
+# Ratio of Total Thrust generated to the input RF Power.
+xi_vec_Thrust_eff = (Ti_vec + Tn_vec) / PRF
+
+
+# C. MASS UTILIZATION EFFICIENCY (Eta_m)
+# The fraction of the injected propellant (Q0) that is successfully ionized and extracted.
+
+# eta_m = Ion Mass Flow Rate / Total Injected Mass Flow Rate
+eta_vec_mass_utilization_eff = Gamma_i_vec * Ai / Q0
+
+FIG6 = plt.figure()
+plt.plot(PRF, zeta_vec_Power_transfer_eff, label = 'Power transfer efficiency', color = color1, linestyle = '--')
+plt.plot(PRF, gamma_vec__Thrust_Power_eff, label = 'Thrust-Power efficiency', color = color2, linestyle = 'dotted')
+plt.plot(PRF, eta_vec_mass_utilization_eff, label = 'Mass utilization efficiency', color = 'darkorange', linestyle = 'dashdot')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} $W$)', color = 'k', linestyle = '-.')
+plt.xlabel('PRF ($W$)')
+plt.ylabel('efficiency')
+plt.title('Efficiencies vs PRF')
+plt.legend()
+plt.tight_layout()
+plt.close()
+
+FIG7 = plt.figure()
+plt.plot(PRF, xi_vec_Thrust_eff * 1e6, label = 'Thrust efficiency', color = color1, linestyle = '--')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} $W$)', color = 'k', linestyle = '-.')
+plt.xlabel('PRF ($W$)')
+plt.ylabel('Thrust efficiency $(mN/kW)$')
+plt.title('Thrust efficiency vs PRF')
+plt.legend()
+plt.tight_layout()
+plt.close()
+
+FIG3 = plt.figure()
+plt.plot(PRF, n_vec, label = 'Plasma number density', color = 'orange', linestyle = 'dotted')
+plt.plot(PRF, ng_vec, label = 'Gas number density', color = 'violet', linestyle = '-')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} W)', color = 'k', linestyle = '-.')
+plt.yscale('log')
+plt.xlabel('PRF ($W$)')
+plt.ylabel('number density ($m^-3$)')
+plt.title('Particle densities in the thruster chamber as a function of the RF power')
+plt.legend()
+plt.tight_layout()
+plt.close()
+
+FIG5 = plt.figure()
+plt.plot(PRF, Ti_vec * 1000, label = 'Ions', color = color1, linestyle = '-')
+plt.plot(PRF, Tn_vec * 1000, label = 'Neutrals', color = color2, linestyle = '-.')
+plt.plot(PRF, (Ti_vec + Tn_vec) * 1000, label = 'Total', color = 'green')
+plt.axvline(x = P_sat, label = f'Saturation ({P_sat:.0f} $W$)', color = 'k', linestyle = '-.')
+plt.yscale('log')
+plt.xlabel('PRF ($W$)')
+plt.ylabel('Thrust ($mN$)')
+plt.title('Total Thrust contributions vs PRF')
+plt.legend()
+plt.tight_layout()
+plt.close()
+
+
+# --- 10. MODIFIED ODE SYSTEM FOR PLOTS 8 AND 9 (VARIABLE MASS FLOW) ---
+
+def derivation_JCL_fixed(t, Y, PRF, Q0_):
+    """
+    
+Only difference from the function 'derivation':
+    This function accepts 'Q0_' as a dynamic argument, allowing the solver 
+    to iterate over different Mass Flow Rates.
+Some notes are left to facilitate the comprehension.
+    Args:
+        t (float): Time (s).
+        Y (list): State vector [n, ng, Tg, Te].
+        PRF (float): RF Power input (Watts).
+        Q0_ (float): Specific Mass Flow Rate for this iteration (particles/s).
+        
+    Returns:
+        list: Derivatives [dn/dt, dng/dt, dTg/dt, dTe/dt].
+    """
+    n, ng, Tg, Te = Y
+
+    # --- A. REACTION RATES ---
+    # Excitation and Ionization rate coefficients (function of Te)
+    Kex = 1.2921e-13 * np.exp(- Eexc / (kB_eV * Te))
+
+    Kiz1 = 6.73e-15 * np.sqrt(kB_eV * Te) * (3.97 + 0.643 * (kB_eV * Te) - 0.0368 * (kB_eV * Te)**2) * np.exp(- Eiz / (kB_eV * Te))
+    Kiz2 = 6.73e-15 * np.sqrt(kB_eV * Te) * (-0.0001031 * (kB_eV * Te)**2 + 6.386 * np.exp(- Eiz / (kB_eV * Te)))
+    Kiz = (Kiz1 + Kiz2) / 2
+
+
+    # --- B. PLASMA DENSITY BALANCE (dn/dt) ---
+    uB = np.sqrt(kB_eV * Te * e / (M))        # Bohm velocity
+    mfp_i = (ng * sigma_i)**-1                # Ion mean free path
+    
+    # Geometric factors for diffusion in finite cylinder
+    hL = 0.86 * (3 + L/(2*mfp_i))**-0.5
+    hR = 0.8 * (4 + R/mfp_i)**-0.5
+
+    Aeff = 2 * hR * np.pi * R * L + 2 * hL * np.pi * R**2 # Effective loss area
+
+    # Conservation of ions: Production - Wall Loss
+    dn_dt = n * ng * Kiz - n * uB * Aeff / V
+
+
+    # --- C. NEUTRAL GAS BALANCE (dng/dt) ---
+    vg = np.sqrt(8 * kB_eV * e * Tg / (np.pi * M))
+    Gamma_g = 0.25 * ng * vg
+    Aeff1 = 2 * hR * np.pi * R * L + (2 - beta_i) * hL * np.pi * R**2 
+
+    # Conservation of neutrals:
+    # 1. Injection term (Uses Q0_ passed as argument, NOT global Q0)
+    # 2. Wall Recycling (Ions hitting wall return as neutrals)
+    # 3. Loss via Ionization
+    # 4. Loss via Grid extraction
+    dng_dt = Q0_ / V + n * uB * Aeff1 / V - n * ng * Kiz - Gamma_g * Ag / V
+
+
+    # --- D. GAS TEMPERATURE BALANCE (dTg/dt) ---
+    Tions_ = Tg
+    vi = np.sqrt(8 * kB_eV * e * Tions_ / (np.pi * M))
+    Kin = sigma_i * vi
+    
+    # Heating (Elastic + Charge Exchange) minus Cooling (Wall Conduction + Convection)
+    dTg_dt = 2 * me/M * (Te - Tg) * n * Kel + M * uB**2 * n * Kin / (6 * kB_eV * e) - 2 * k * A / (3 * kB_eV * e * V * ng) * (Tg - Tg0) / Delta0 - Tg / ng *dng_dt
+
+
+    # --- E. ELECTROMAGNETIC COUPLING ---
+    nu_m = ng * Kel
+    omega_pe = np.sqrt(n * e**2/(me * epsilon_0))
+    epsilon_p = 1 - omega_pe**2 / (omega * (omega - 1j * nu_m))
+    
+    k_ = k0_ * np.sqrt(epsilon_p)
+    argument = R * k_
+    
+    # Calculate equivalent resistance of the plasma (R_ind)
+    Rind = 2*np.pi*N**2 / (L*omega*epsilon_0) * np.real(1j * argument * jv(1, argument) / (epsilon_p * jv(0, argument)))
+    
+    # Calculate Coil Current for the specific Power Input (PRF)
+    Icoil = Ic(PRF, Rind, Rcoil)
+    
+    # Power Absorbed by Plasma
+    Pabs = Rind * Icoil**2 / (2*V)
+    
+    # Power Lost (Collisions + Wall Sheath)
+    Ploss = Eiz * e * n * ng * Kiz + Eexc * e * n * ng * Kex + 3 * me/M * kB_eV * e * (Te - Tg) * n * ng * Kel + 7 * kB_eV * e * Te * n * uB * Aeff / V
+    
+
+    # --- F. ELECTRON TEMPERATURE BALANCE (dTe/dt) ---
+    dTe_dt = 2/3 * (Pabs - Ploss) / (n * kB_eV * e) - Te / n * dn_dt
+
+    return dn_dt, dng_dt, dTg_dt, dTe_dt
+
+# --- SETUP FOR THE SWEEP ---
+
+# Define the range of Mass Flow Rates to investigate
+# From 0.5 mg/s to 40 mg/s (as per Fig 8 in the paper)
+mg_flow_rates = np.linspace(0.5, 40, 150)
+
+# Convert mass flow (mg/s) to particle flow rate (particles/s)
+# Q [part/s] = (Flow [kg/s]) / Mass_atom [kg]
+Q0_array = (mg_flow_rates * 1e-6) / M
+
+# Print the Child-Langmuir limit for reference (calculated previously)
+print(f'JCL = {JCL:.4f} $A/(m^2)$')
+
+# --- 11. INTEGRATION WRAPPER FOR PLOTS 8 AND 9 ---
+
+def integration_for_ss_values_JCL_fixed(derivation_JCL_fixed, Y0, PRF, Q0_):
+    """
+    Integrates the specific ODE system (variable Q0) to steady state.
+    
+    Args:
+        derivation_JCL_fixed (callable): The specific ODE function defined above.
+        Y0 (list): Initial conditions [n, ng, Tg, Te].
+        PRF (float): Fixed RF Power for this specific integration step.
+        Q0_ (float): Fixed Mass Flow Rate for this specific integration step.
+        
+    Returns:
+        tuple: Steady-state values (n_ss, ng_ss, Tg_ss, Te_ss).
+    """
+    
+    # Lambda wrapper:
+    # 'solve_ivp' expects a function f(t, y). We wrap our function 
+    # to "freeze" the parameters PRF and Q0_ for this specific run.
+    fun_sim = lambda t, y: derivation_JCL_fixed(t, y, PRF, Q0_)
+    
+    # Solver execution:
+    # We continue to use 'LSODA' because the system remains stiff 
+    # (fast electron dynamics vs slow neutral gas dynamics).
+    sol = solve_ivp(fun_sim, [0, 0.03], Y0, method='LSODA', rtol=1e-6, atol=1e-10)
+    if not sol.success:
+        print(f'Warning! Integration failed at PRF = {PRF:.2e} W (Q = {Q0_:.2e} 1/s)')
+        return np.nan, np.nan, np.nan, np.nan
+    # Extraction of time series
+    plasma_number_density = sol.y[0]
+    gas_number_density = sol.y[1]
+    gas_temperature = sol.y[2]
+    electron_temperature = sol.y[3]
+
+    # Steady-State Extraction:
+    # We take the final element [-1] of the arrays, assuming convergence 
+    # within the simulated time window (0.03s).
+    n_ss = plasma_number_density[-1]
+    ng_ss = gas_number_density[-1]
+    Tg_ss = gas_temperature[-1]
+    Te_ss = electron_temperature[-1]
+    
+    return n_ss, ng_ss, Tg_ss, Te_ss
+
+
+# --- 12. INITIALIZATION FOR FINDING PARAMETERS AT SATURATION CONDITION (OPTIMIZATION LOOP) ---
+
+# Define the high-resolution Power Sweep for the inner loop
+# We sweep from 50W to 2000W to ensure we find the intersection point 
+# where Ion Current == Child-Langmuir Limit (Saturation).
+PRF_sweep = np.arange(50, 2001, 15)
+
+# Initialize storage lists to capture the "Saturation Point" for each Mass Flow Rate.
+# These will store the final optimized data for plotting plots 8 and 9.
+
+P_sat_array = []    # Saturation RF Power (W)
+n_sat_array = []    # Plasma density at saturation
+ng_sat_array = []   # Neutral density at saturation
+Tg_sat_array = []   # Gas temperature at saturation
+Te_sat_array = []   # Electron temperature at saturation
+
+Q0_valid_array = [] # Stores Q0 values where saturation was successfully found
+
+# Efficiency metrics at the saturation point
+zeta_sat_array = []   # Power transfer efficiency
+eta_sat_array = []    # Mass utilization efficiency
+gamma_sat_array = []  # Thrust-to-power efficiency
+
+
+# --- 13. MASS FLOW OPTIMIZATION LOOP ---
+
+# Iterate over each Mass Flow Rate (Q) in the array defined previously.
+# The goal is to find the "Saturation Point" for every specific flow rate.
+for Q in Q0_array:
+    
+    Y = []
+    
+    # 1. INNER SWEEP: PLASMA RESPONSE CURVE
+    # Simulate the plasma steady-state for the full range of RF powers (50W - 2000W)
+    # keeping the current Mass Flow Rate (Q) constant.
+    for power_value in PRF_sweep:
+        # Call the integration wrapper specific for Phase 2 (variable Q)
+        Y_fixedPRF = integration_for_ss_values_JCL_fixed(derivation_JCL_fixed, Y0, power_value, Q)
+        Y.append(Y_fixedPRF)
+
+    # Convert results to a NumPy array for vectorization
+    Y = np.array(Y)
+
+    # Extract state variable vectors for the current flow rate sweep
+    n_vec_JCL = Y[:,0]   # Plasma density
+    ng_vec_JCL = Y[:,1]  # Neutral density
+    Tg_vec_JCL = Y[:,2]  # Gas temperature
+    Te_vec_JCL = Y[:,3]  # Electron temperature
+
+    # 2. PHYSICS CALCULATIONS (Vectorized)
+    # Calculate derived plasma parameters for the whole power sweep
+    
+    # Bohm velocity (m/s)
+    uB_vec_JCL = np.sqrt(kB_eV*e*Te_vec_JCL/M)
+    
+    # Ion mean free path (m)
+    mfp_i_vec_JCL = (sigma_i * ng_vec_JCL)**-1
+    
+    # Axial center-to-edge density ratio (hL)
+    hL_vec_JCL = 0.86 * (3 + L/(2 * mfp_i_vec_JCL))**-0.5
+    
+    # Ion Flux at the grid (m^-2 s^-1)
+    Gamma_i_vec_JCL = hL_vec_JCL * n_vec_JCL * uB_vec_JCL
+    
+    # Ion Current Density (A/m^2)
+    # This is the critical parameter to compare against the Child-Langmuir limit.
+    Ji_vec_JCL = Gamma_i_vec_JCL * e
+
+    # 3. SATURATION CHECK
+    # If the maximum current density achievable (even at max Power) is lower 
+    # than the Child-Langmuir limit (JCL), saturation is impossible for this flow rate.
+    # We skip this data point to avoid extrapolation errors.
+    if np.max(Ji_vec_JCL) < JCL:
+        continue
+
+    # 4. EFFICIENCY RECALCULATION
+    # Recalculate electromagnetic and performance metrics for the sweep
+    
+    # EM Coupling & Power Transfer Efficiency (zeta)
+    nu_m_vec_JCL = ng_vec_JCL * Kel
+    omega_pe_vec_JCL = np.sqrt(n_vec_JCL * e**2/(me * epsilon_0))
+    epsilon_p_vec_JCL = 1 - omega_pe_vec_JCL**2 / (omega * (omega - 1j * nu_m_vec_JCL))
+    k_vec_JCL = k0_ * epsilon_p_vec_JCL**0.5
+    argument_vec_JCL = k_vec_JCL * R
+    Rind_vec_JCL = 2 * np.pi * N**2 / (L * omega * epsilon_0) * np.real(1j * argument_vec_JCL * jv(1, argument_vec_JCL) / (epsilon_p_vec_JCL * jv(0, argument_vec_JCL)))
+    
+    zeta_vec_Power_transfer_eff_JCL = Rind_vec_JCL / (Rind_vec_JCL + Rcoil)
+    Pabs_vec_JCL = zeta_vec_Power_transfer_eff_JCL * PRF_sweep
+
+    # Thrust Power Efficiency (gamma) components
+    Pi_vec_JCL = Ji_vec_JCL * Vgrid * Ai   # Ion Beam Power
+    vg_vec_JCL = np.sqrt(8 * kB_eV * e * Tg_vec_JCL / (np.pi * M))
+    Gamma_g_vec_JCL = 0.25 * ng_vec_JCL * vg_vec_JCL
+    Pn_vec_JCL = 0.5 * M * vg_vec_JCL**2 * Gamma_g_vec_JCL * Ag # Neutral Kinetic Power
+    
+    gamma_vec__Thrust_Power_eff_JCL = (Pi_vec_JCL + Pn_vec_JCL) / (Pi_vec_JCL + Pn_vec_JCL + PRF_sweep)
+
+    # Mass Utilization Efficiency (eta_m)
+    eta_vec_mass_utilization_eff_JCL = Gamma_i_vec_JCL * Ai / Q
+
+
+    # 5. INVERSE PROBLEM SOLVER (INTERPOLATION)
+    # Find the exact RF Power (P_sat) required to reach J_i == J_CL.
+    # We use linear interpolation to find the precise operating point.
+    P_sat_JCL = np.interp(JCL, Ji_vec_JCL, PRF_sweep)
+    P_sat_array.append(P_sat_JCL)
+    
+    # Extract Plasma Parameters at Saturation
+    n_sat_instance = np.interp(P_sat_JCL, PRF_sweep, n_vec_JCL)
+    ng_sat_instance = np.interp(P_sat_JCL, PRF_sweep, ng_vec_JCL)
+    Tg_sat_instance = np.interp(P_sat_JCL, PRF_sweep, Tg_vec_JCL)
+    Te_sat_instance = np.interp(P_sat_JCL, PRF_sweep, Te_vec_JCL)
+    
+    n_sat_array.append(n_sat_instance)
+    ng_sat_array.append(ng_sat_instance)
+    Tg_sat_array.append(Tg_sat_instance)
+    Te_sat_array.append(Te_sat_instance)
+
+    # Extract Efficiencies at Saturation
+    zeta_sat_instance = np.interp(P_sat_JCL, PRF_sweep, zeta_vec_Power_transfer_eff_JCL)
+    eta_sat_instance = np.interp(P_sat_JCL, PRF_sweep, eta_vec_mass_utilization_eff_JCL)
+    gamma_sat_instance = np.interp(P_sat_JCL, PRF_sweep, gamma_vec__Thrust_Power_eff_JCL)
+    
+    zeta_sat_array.append(zeta_sat_instance)
+    eta_sat_array.append(eta_sat_instance)
+    gamma_sat_array.append(gamma_sat_instance)
+
+    # Store the valid Mass Flow Rate for X-axis plotting
+    Q0_valid_array.append(Q)
+
+
+# --- 14. POST-PROCESSING (DATA CONVERSION & THRUST CALCULATION) ---
+
+# Convert the valid data lists (populated inside the loop) into NumPy arrays.
+# This enables efficient vectorized mathematical operations for the final plots.
+Q0_valid_array = np.array(Q0_valid_array)
+n_sat_array = np.array(n_sat_array)
+ng_sat_array = np.array(ng_sat_array)
+Tg_sat_array = np.array(Tg_sat_array)
+Te_sat_array = np.array(Te_sat_array)
+P_sat_array = np.array(P_sat_array)       # The specific RF Power required for saturation
+zeta_sat_array = np.array(zeta_sat_array)
+eta_sat_array = np.array(eta_sat_array)
+gamma_sat_array = np.array(gamma_sat_array)
+
+
+# --- THRUST COMPONENT CALCULATION ---
+
+# 1. Neutral Gas Exhaust Velocity (Thermal)
+# Calculated from the gas temperature at saturation.
+vg_sat_array = np.sqrt(8 * kB_eV * e * Tg_sat_array / (np.pi * M))
+
+# 2. Neutral Thrust (Tn)
+# Force generated by the thermal expansion of the neutral gas leaking through the grids.
+# Formula: Tn = (Mass Flow of Neutrals) * (Thermal Velocity)
+# Tn = (0.25 * ng * vg * Ag * M) * vg  -> simplifies to expression below
+Tn_sat_array = 0.25 * M * ng_sat_array * Ag * vg_sat_array**2
+
+# 3. Ion Thrust (Ti)
+# Calculated at the Child-Langmuir Limit (JCL).
+# Since JCL, Vgrid, and Grid Area (Ai) are fixed geometric/electric parameters,
+# the maximum extractable ion thrust is CONSTANT regardless of mass flow (provided we have enough power).
+
+Gamma_i_sat = JCL / e  # Ion flux at saturation limit
+Ti_scalar = (Gamma_i_sat * Ai) * M * v_beam  # Scalar value (Newtons)
+
+# Create a vector of the same length as the mass flow array, filled with this scalar value.
+# This allows us to plot it as a horizontal line against Q0.
+Ti_sat_array = np.full_like(Tn_sat_array, Ti_scalar)
+
+
+# --- UNIT CONVERSION FOR PLOTTING ---
+# Convert Mass Flow Rate from particles/second to mg/s for readability on the X-axis.
+Q_array_mg_s = Q0_valid_array * M * 1e6
+
+
+FIG8 = plt.figure()
+plt.plot(Q_array_mg_s, Tn_sat_array * 1000, label = 'Neutrals contribution', linestyle = '--', color = color1)
+plt.plot(Q_array_mg_s, Ti_sat_array * 1000, label = 'Ions contribution', linestyle = '--', color = color2)
+plt.plot(Q_array_mg_s, (Tn_sat_array + Ti_sat_array) * 1000 , label = 'Total contribution', color = 'green')
+plt.title('Thrust vs Injected mass flow rate')
+plt.xlabel('$Q_0$ ($mg/s$)')
+plt.ylabel('Thrust ($mN$)')
+plt.legend()
+plt.tight_layout()
+plt.close()
+
+
+FIG9 = plt.figure()
+plt.plot(Q_array_mg_s, zeta_sat_array, label = 'Power transfer efficiency', linestyle = 'dotted', color = color1)
+plt.plot(Q_array_mg_s, eta_sat_array, label = 'Mass utilization efficiency', linestyle = 'dotted', color = color2)
+plt.plot(Q_array_mg_s, gamma_sat_array, label = 'Thrust-Power efficiency', color = 'green')
+plt.title('Efficiencies vs Injected mass flow rate')
+plt.xlabel('$Q_0$ ($mg/s$)')
+plt.ylabel('efficiency')
+plt.legend()
+plt.tight_layout()
+plt.close()
+
+fig, axs = plt.subplots(2 ,2 ,figsize = (14, 10))
+fig.suptitle('Global Model Results Dashboard (FIGURES 2 to 5)', fontsize = 16)
+for ax in axs.flat:
+    ax.axis('off')
+axs[0, 0].imshow(get_img_from_fig(FIG2))
+axs[0, 0].set_title('')
+
+axs[0, 1].imshow(get_img_from_fig(FIG3))
+axs[0, 1].set_title('')
+
+axs[1, 0].imshow(get_img_from_fig(FIG4))
+axs[1, 0].set_title('')
+
+axs[1, 1].imshow(get_img_from_fig(FIG5))
+axs[1, 1].set_title('')
+
+plt.tight_layout()
+fig, axs = plt.subplots(2 ,2 ,figsize = (14, 10))
+fig.suptitle('Global Model Results Dashboard (FIGURES 6 to 9)', fontsize = 16)
+for ax in axs.flat:
+    ax.axis('off')
+axs[0, 0].imshow(get_img_from_fig(FIG6))
+axs[0, 0].set_title('')
+
+axs[0, 1].imshow(get_img_from_fig(FIG7))
+axs[0, 1].set_title('')
+
+axs[1, 0].imshow(get_img_from_fig(FIG8))
+axs[1, 0].set_title('')
+
+axs[1, 1].imshow(get_img_from_fig(FIG9))
+axs[1, 1].set_title('')
+
+plt.tight_layout()
+
+plt.show()
+        
