@@ -129,6 +129,10 @@ def simulation_worker(params):
     # Unpack the parameters received from the main process: ID, Power (W), Flow (mg/s)
     sim_id, power_val, flow_rate_mg = params
     
+    # To start the stopwatch
+    start_time = time.time()
+
+
     # Convert Mass Flow Rate from mg/s to particles/second (Physical unit conversion)
     Q_val = (flow_rate_mg * 1e-6) / M
     
@@ -176,13 +180,19 @@ def simulation_worker(params):
     # Total Thrust is the sum of Ion and Neutral components
     Total_Thrust = Ti + Tn
     
+    # To stop the stopwatch
+    end_time = time.time()
+
+    elapsed_time = end_time - start_time
+
     # Return a dictionary containing inputs and calculated outputs
     return {
             "id": sim_id,
             "Input_Power_W": power_val,
             "Input_Flow_mg_s": flow_rate_mg,
             "Output_Thrust_mN": Total_Thrust * 1000, # Convert N to mN
-            "Success": True
+            "Success": True,
+            "Execution_time_s": elapsed_time
         }
 
 # --- 3. MAIN BLOCK (Executed once to manage the parallel pool) ---
@@ -226,5 +236,14 @@ if __name__ == "__main__":
     df.to_csv('GlobalModel_Dataset.csv', index = False)
 
 
+    # Now it is useful to calculate the mean, min and max of the processing time to compare it to the ML Surrogate
+    mean_time = df['Execution_time_s'].mean()
+    min_time = df['Execution_time_s'].min()
+    max_time = df['Execution_time_s'].max()
+
+    print('\n--- PROCESSING TIME ---')
+    print(f'The mean processing time is {mean_time:.2f} s')
+    print(f'The min processing time is {min_time:.2f} s')
+    print(f'The max processing time is {max_time:.2f} s')
 
     

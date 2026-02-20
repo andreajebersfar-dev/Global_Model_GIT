@@ -41,6 +41,7 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf 
 import joblib
+import time
 
 # --- 1. PAGE CONFIGURATION ---
 # Sets the browser tab title and centers the layout for a professional look.
@@ -100,9 +101,18 @@ input_data = np.array([[power, flow]])
 input_scaled = scaler_X.transform(input_data)
 
 # Step C: Predict.
-# The model calculates the result based on the training.
-# verbose=0 keeps the terminal clean (hides the progress bar).
-prediction_scaled = model.predict(input_scaled, verbose=0)
+
+# start the stopwatch
+start_time_single = time.time()
+
+# We call the model directly to bypass the overhead of model.predict() and minimize latency.
+# 'training=False' ensures the model runs strictly in inference mode.
+# '.numpy()' converts the TensorFlow Tensor output back into a standard Numpy array.
+prediction_scaled = model(input_scaled, training=False).numpy()
+
+# stop the stopwatch
+end_time_single = time.time()
+latency = (end_time_single - start_time_single) * 1000 # latency in ms 
 
 # Step D: Denormalize.
 # [0][0] extracts the single number from the matrix.
@@ -114,6 +124,7 @@ st.subheader('Simulation Results')
 
 # st.metric displays the value in a large, bold font.
 st.metric('Thrust (mN)', f'{thrust_mN:.2f} mN')
+st.caption(f'Latency = {latency:.2f} ms. (The physical solver was ~70 ms)')
 
 # --- 7. DEBUGGING SECTION ---
 # This expandable box is hidden by default. 
@@ -166,7 +177,10 @@ if st.button('Find optimized parameters'):
     inputs_scaled = scaler_X.transform(virtual_inputs)
     
     # The AI predicts the thrust for all 50,000 configurations at once
+    time_start_mc = time.time()
     pred_scaled = model.predict(inputs_scaled, verbose=0)
+    time_end_mc = time.time()
+    time_mc = (time_end_mc - time_start_mc) * 1000 # in ms
     
     # Convert the predictions back to real units (mN)
     pred_real = scaler_y.inverse_transform(pred_scaled)
@@ -187,7 +201,7 @@ if st.button('Find optimized parameters'):
     if len(valid_indices) > 0:
         # Success! We found at least one valid configuration.
         st.success(f'Found {len(valid_indices)} valid configurations for {target_thrust} mN')
-
+        st.caption(f'Latency for optimization = {time_mc:.2f} ms. (The physical solver was ~58 min !)')
         # Extract the Power, Flow, and Thrust for only the valid candidates
         cand_power  = rnd_power[valid_indices]
         cand_flow   = rnd_flow[valid_indices]

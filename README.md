@@ -22,7 +22,12 @@ The physics model is based on:
 > Chabert et al., Physics of Plasmas (2012)  
 > DOI: 10.1063/1.4737114  
 
+
 ---
+**Project Highlights:**
+- **27x Faster Single Inference:** Latency for a single plasma simulation reduced from ~70 ms (Physics Solver) to ~2.6 ms (AI Surrogate).
+
+- **1800x Faster Optimization:** Complete thrust optimization (50,000 configurations) reduced from ~58 minutes to just ~2 seconds.
 
 ## 🧭 Pipeline Architecture
 
@@ -121,9 +126,9 @@ Transforms physics simulations into a dataset for ML training.
 Generate 5,000 operating points across the thruster envelope.
 
 **Why:**
-- physics solver = slow (seconds per run)  
-- ML requires large dataset  
-- enables real-time prediction later  
+- Physics solver latency: The ODE-based solver has an average processing time of ~70 ms per run.  
+- Computational cost: Without a surrogate model, performing a massive optimization of 50,000 configurations (Phase 4) would require approximately 58 minutes of continuous computation.  
+- ML requirements: The neural network requires a large and well-distributed dataset (5,000 points) to accurately map the operational space and enable real-time inference.  
 
 ## Techniques
 
@@ -168,11 +173,15 @@ pip install pandas scipy
 Neural network approximating the plasma physics model.
 
 ## Goal
-Replace ODE solver with fast inference model.
+Replace the computationally expensive ODE solver with a high-speed inference model.
 
-Result:
+**Performance Benchmarking:**
+
+To ensure the validity of the surrogate, latency was measured using the dedicated script latency_average_calculator.py
 ```
-seconds → milliseconds
+- Physics Solver: ~70 ms per calculation.
+- ML Surrogate (Pure Inference): ~2.6 ms per prediction.
+- Speed-up: The surrogate model is approximately 27x faster for single-point inference.
 ```
 
 ## Data Pipeline
@@ -232,7 +241,7 @@ Pipeline:
 input → normalization → NN inference → denormalization → thrust
 ```
 
-Latency: < 50 ms
+Latency: < 50 ms (typically 20-30 ms on Streamlit)
 
 ### Inverse Design Optimization
 
